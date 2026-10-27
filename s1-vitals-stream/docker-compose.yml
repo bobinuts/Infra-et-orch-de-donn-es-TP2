@@ -1,0 +1,127 @@
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.8.0
+    container_name: vitals-kafka
+    environment:
+      # Identité KRaft : un seul nœud, broker + controller
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qg
+      # Listeners : sur quoi le broker écoute
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:29092
+      # Listeners annoncés : ce que les clients utilisent pour rappeler le broker
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Réplication : un seul broker, donc 1 partout
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Démarrage et garde-fous
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # Données
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    networks:
+      - vitals-net
+    ports:
+      - "29092:29092"
+
+  # --- Séance 2 : la mémoire durable du système ---------------------------------------------
+  postgres:
+    # PostgreSQL 18.6 figé par digest : seul le tag latest est gratuit chez Chainguard,
+    # et un tag latest seul n'est pas une version.
+    image: cgr.dev/chainguard/postgres:latest@sha256:0926ac7262a2c1963179eb939cd5d610e1be3ecca90b4b5cad8db8df16fab87e
+    container_name: vitals-postgres
+    environment:
+      # Lues par l'entrypoint de l'image au premier démarrage seulement
+      POSTGRES_DB: healthstream
+      POSTGRES_USER: hs_user
+      POSTGRES_PASSWORD: hs_password
+    ports:
+      # Port hôte volontairement décalé : évite le conflit avec un PostgreSQL local sur 5432
+      - "55432:5432"
+    volumes:
+      # Données : volume nommé
+      - pg-data:/var/lib/postgresql/data
+      # Schéma : configuration, donc bind mount en lecture seule. L'image Chainguard ignore
+      # /docker-entrypoint-initdb.d : son répertoire d'initialisation est /var/lib/postgres/initdb/
+      - ./sql/init.sql:/var/lib/postgres/initdb/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hs_user -d healthstream"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - vitals-net
+
+  producer:
+    build:
+      context: ./producer
+    container_name: vitals-producer
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      VITALS_TOPIC: mimic-vitals
+      # Réglable depuis le terminal (partie 5.2) : variable du terminal si elle existe, 1.0 sinon
+      INTERVAL_S: "${INTERVAL_S:-1.0}"
+    volumes:
+      - vitals-logs:/app/logs
+    networks:
+      - vitals-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  consumer:
+    build:
+      context: ./consumer
+    # PAS de container_name : Compose refuserait de dupliquer un nom fixe, et
+    # « docker compose up -d --scale consumer=2 » (partie 5.2) échouerait.
+    environment:
+      # Adresses internes au réseau Docker : noms de service et ports internes, jamais localhost
+      KAFKA_BOOTSTRAP: kafka:9092
+      VITALS_TOPIC: mimic-vitals
+      CONSUMER_GROUP: vitals-persister
+      AUTO_OFFSET_RESET: earliest
+      # Surchargeable depuis le terminal (partie 5.2) : 200 par défaut
+      BATCH_SIZE: "${BATCH_SIZE:-200}"
+      BATCH_TIMEOUT_S: "5.0"
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_DB: healthstream
+      PG_USER: hs_user
+      PG_PASSWORD: hs_password
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - vitals-net
+
+volumes:
+  vitals-logs:
+  kafka-data:
+  pg-data:
+
+networks:
+  vitals-net:
+    driver: bridge

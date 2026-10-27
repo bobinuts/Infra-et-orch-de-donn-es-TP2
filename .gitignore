@@ -1,0 +1,19 @@
+# Environnement Python local
+.venv/
+__pycache__/
+*.pyc
+
+# Variables d'environnement et secrets éventuels
+.env
+.env.*
+
+# Hors rendu : sauvegarde du schéma, journaux, archives
+schema_dump.sql
+*.log
+*.zip
+
+# Éditeurs et système
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
